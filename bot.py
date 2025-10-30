@@ -45,7 +45,20 @@ async def init_db():
                 );
             """)
             await conn.commit()
-
+def init_db_sync():
+    with psycopg.connect(os.getenv("DATABASE_URL"), autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    category TEXT NOT NULL,
+                    subcategory TEXT NOT NULL,
+                    amount NUMERIC(10,2) NOT NULL,
+                    label TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 # === CONSTANTS ===
 NEEDS_TARGET = Decimal("500")
 WANTS_TARGET = Decimal("300")
@@ -252,4 +265,40 @@ async def main():
         await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 1) Make sure the table exists (sync, safe to call once on boot)
+    init_db_sync()
+
+    # 2) Build the bot and handlers
+    app = Application.builder().token(TOKEN).build()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_amount)],
+            CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_category)],
+            SUBCATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_subcategory)],
+            LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_label)],
+        },
+        fallbacks=[],
+        allow_reentry=True,
+    )
+
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("needs", needs))
+    app.add_handler(CommandHandler("wants", wants))
+    app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("restart", restart))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu))
+
+    # 3) Start the bot (blocking methods — DO NOT await)
+    if RUN_MODE == "webhook" and PUBLIC_URL:
+        port = int(os.environ.get("PORT", "10000"))
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TOKEN,
+            webhook_url=f"{PUBLIC_URL}/{TOKEN}",
+        )
+    else:
+        app.run_polling()
+
